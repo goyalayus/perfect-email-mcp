@@ -1,0 +1,17 @@
+{
+  "name": "email-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server that wraps the email-bridge skill with automatic thread management",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.11.3",
+    "imapflow": "^1.2.15",
+    "mailparser": "^3.9.4",
+    "nodemailer": "^8.0.2"
+  }
+}
