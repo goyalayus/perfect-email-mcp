@@ -13,11 +13,18 @@ MCP server that turns the existing `email_bridge.py` workflow into tool-level pr
 
 ## Automatic Thread Mapping
 
-By default, mapping key is `CODEX_THREAD_ID`.
+Mapping key selection order:
 
-- One Codex chat/thread -> one Gmail thread.
-- The server stores mapping in `~/.codex/email-bridge/mcp-state/thread-map.json`.
-- Override key per call with optional `context_id` argument if needed.
+1. explicit `context_id` argument
+2. `CODEX_THREAD_ID` env var
+3. `CODEX_SESSION_ID` env var
+4. fallback: `default`
+
+Behavior:
+
+- One mapping key -> one Gmail thread.
+- Mapping is stored in `~/.codex/email-bridge/mcp-state/thread-map.json`.
+- For non-Codex clients, pass `context_id` in tool calls if you want separate Gmail threads per chat/session.
 
 ## Prerequisites
 
@@ -37,7 +44,24 @@ cd email-mcp
 npm install
 ```
 
-## Codex Config Example
+## Add To Your App (MCP)
+
+This is a local `stdio` MCP server.
+
+- command: `node`
+- args: `["/absolute/path/to/email-mcp/index.js"]`
+- env: mailbox credentials + optional tuning flags
+
+Recommended env vars:
+
+- `CODEX_EMAIL_ADDRESS`
+- `CODEX_EMAIL_PASSWORD`
+- `CODEX_EMAIL_TO`
+- `EMAIL_MCP_PREWARM=true`
+- `EMAIL_MCP_BRIDGE_SCRIPT=/absolute/path/to/email-mcp/bridge/email_bridge.py`
+- `EMAIL_MCP_PYTHON=python3`
+
+### Codex (`~/.codex/config.toml`)
 
 Add this in `~/.codex/config.toml`:
 
@@ -48,11 +72,53 @@ args = ["/absolute/path/to/email-mcp/index.js"]
 tool_timeout_sec = 3600
 
 [mcp_servers.email.env]
+CODEX_EMAIL_ADDRESS = "your_email@gmail.com"
+CODEX_EMAIL_PASSWORD = "your_app_password"
+CODEX_EMAIL_TO = "recipient@example.com"
+EMAIL_MCP_PREWARM = "true"
 EMAIL_MCP_BRIDGE_SCRIPT = "/absolute/path/to/email-mcp/bridge/email_bridge.py"
 EMAIL_MCP_PYTHON = "python3"
 ```
 
 `tool_timeout_sec` is important for `email_ask`, since it can wait for a long time.
+
+### Cursor (`~/.cursor/mcp.json` or project `.cursor/mcp.json`)
+
+Add:
+
+```json
+{
+  "mcpServers": {
+    "email-mcp": {
+      "command": "node",
+      "args": ["/absolute/path/to/email-mcp/index.js"],
+      "env": {
+        "CODEX_EMAIL_ADDRESS": "your_email@gmail.com",
+        "CODEX_EMAIL_PASSWORD": "your_app_password",
+        "CODEX_EMAIL_TO": "recipient@example.com",
+        "EMAIL_MCP_PREWARM": "true"
+      }
+    }
+  }
+}
+```
+
+Then restart Cursor.
+
+### Claude Code
+
+Use MCP add with stdio:
+
+```bash
+claude mcp add --transport stdio \
+  --env CODEX_EMAIL_ADDRESS=your_email@gmail.com \
+  --env CODEX_EMAIL_PASSWORD=your_app_password \
+  --env CODEX_EMAIL_TO=recipient@example.com \
+  --env EMAIL_MCP_PREWARM=true \
+  email-mcp -- node /absolute/path/to/email-mcp/index.js
+```
+
+If your Claude client uses JSON `mcpServers` config instead, use the same block shown in the Cursor example.
 
 ## Notes
 
