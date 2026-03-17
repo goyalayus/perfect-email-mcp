@@ -83,7 +83,8 @@ const TOOL_DEFS = [
         to: { type: "string", description: "Recipient email. Optional when CODEX_EMAIL_TO is set." },
         context_id: {
           type: "string",
-          description: "Optional explicit mapping key; defaults to CODEX_THREAD_ID for automatic per-chat mapping.",
+          description:
+            "Optional explicit mapping key; otherwise uses CODEX_THREAD_ID/CODEX_SESSION_ID, then a process-scoped fallback.",
         },
       },
       required: ["message"],
@@ -108,7 +109,8 @@ const TOOL_DEFS = [
         },
         context_id: {
           type: "string",
-          description: "Optional explicit mapping key; defaults to CODEX_THREAD_ID for automatic per-chat mapping.",
+          description:
+            "Optional explicit mapping key; otherwise uses CODEX_THREAD_ID/CODEX_SESSION_ID, then a process-scoped fallback.",
         },
       },
       required: ["question"],
@@ -129,7 +131,8 @@ const TOOL_DEFS = [
         },
         context_id: {
           type: "string",
-          description: "Optional explicit mapping key; defaults to CODEX_THREAD_ID for automatic per-chat mapping.",
+          description:
+            "Optional explicit mapping key; otherwise uses CODEX_THREAD_ID/CODEX_SESSION_ID, then a process-scoped fallback.",
         },
       },
       additionalProperties: false,
