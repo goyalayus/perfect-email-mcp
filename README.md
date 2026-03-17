@@ -18,13 +18,14 @@ Mapping key selection order:
 1. explicit `context_id` argument
 2. `CODEX_THREAD_ID` env var
 3. `CODEX_SESSION_ID` env var
-4. fallback: `default`
+4. fallback: process-scoped key (`proc-<pid>-<random>`)
 
 Behavior:
 
 - One mapping key -> one Gmail thread.
 - Mapping is stored in `~/.codex/email-bridge/mcp-state/thread-map.json`.
 - For non-Codex clients, pass `context_id` in tool calls if you want separate Gmail threads per chat/session.
+- Optional override: set `EMAIL_MCP_PROCESS_SESSION_KEY` to force a fixed fallback key.
 
 ## Prerequisites
 

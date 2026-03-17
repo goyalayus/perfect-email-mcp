@@ -32,8 +32,9 @@ const MCP_MAP_PATH = process.env.EMAIL_MCP_MAP_FILE || DEFAULT_MAP_PATH;
 const LOCAL_EMAIL_ENV = loadSimpleEnvFile(DEFAULT_EMAIL_ENV_FILE);
 const DEFAULT_TO =
   (process.env.EMAIL_MCP_DEFAULT_TO || process.env.CODEX_EMAIL_TO || LOCAL_EMAIL_ENV.CODEX_EMAIL_TO || "").trim();
-const DEFAULT_SESSION_KEY =
-  (process.env.CODEX_THREAD_ID || "").trim() || (process.env.CODEX_SESSION_ID || "").trim() || "default";
+const PROCESS_FALLBACK_SESSION_KEY =
+  (process.env.EMAIL_MCP_PROCESS_SESSION_KEY || "").trim() ||
+  `proc-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
 const BRIDGE_STATE_DIR = path.resolve(
   process.env.CODEX_EMAIL_STATE_DIR ||
     LOCAL_EMAIL_ENV.CODEX_EMAIL_STATE_DIR ||
@@ -670,7 +671,11 @@ function resolveSessionKey(args) {
   if (args && typeof args.context_id === "string" && args.context_id.trim()) {
     return args.context_id.trim();
   }
-  return DEFAULT_SESSION_KEY;
+  const envSessionKey = (process.env.CODEX_THREAD_ID || "").trim() || (process.env.CODEX_SESSION_ID || "").trim();
+  if (envSessionKey) {
+    return envSessionKey;
+  }
+  return PROCESS_FALLBACK_SESSION_KEY;
 }
 
 function getMappedThread(sessionKey) {
