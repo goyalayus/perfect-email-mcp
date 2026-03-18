@@ -129,4 +129,5 @@ If your Claude client uses JSON `mcpServers` config instead, use the same block 
 - `email_ask` and `email_fetch_response` keep a persistent IMAP session (auto-IDLE), so reply detection is much faster after warm-up.
 - `email_update`/`email_ask` use a pooled SMTP transport when SMTP env vars are present, which reduces repeated send overhead.
 - Default `email_ask` polling interval is 5 seconds (override with `poll_seconds`).
+- Default `email_ask` timeout is 120 seconds (override with `timeout_seconds`; set `0` to wait forever).
 - Startup prewarm is enabled by default (`EMAIL_MCP_PREWARM=true`) and begins IMAP/SMTP warm-up as soon as the MCP server starts.

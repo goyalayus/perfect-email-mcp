@@ -105,7 +105,7 @@ const TOOL_DEFS = [
         timeout_seconds: {
           type: "integer",
           minimum: 0,
-          description: "Wait timeout in seconds. 0 waits forever. Default 0.",
+          description: "Wait timeout in seconds. 0 waits forever. Default 120.",
         },
         context_id: {
           type: "string",
@@ -905,7 +905,7 @@ async function handleEmailAsk(rawArgs = {}) {
   const sessionKey = resolveSessionKey(args);
   const requestedSubject = typeof args.subject === "string" && args.subject.trim() ? args.subject.trim() : "Codex question";
   const pollSeconds = normalizePoll(args.poll_seconds, 5);
-  const timeoutSeconds = normalizeTimeout(args.timeout_seconds, 0);
+  const timeoutSeconds = normalizeTimeout(args.timeout_seconds, 120);
 
   const mapped = getMappedThread(sessionKey);
   const subjectBase = resolveSubjectBase({ mapped, requestedSubject, fallbackSubject: "Codex question" });

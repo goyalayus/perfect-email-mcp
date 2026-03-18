@@ -112,8 +112,8 @@ def _build_parser() -> argparse.ArgumentParser:
     wait_parser.add_argument(
         "--timeout-seconds",
         type=int,
-        default=0,
-        help="Stop waiting after this many seconds. 0 means wait forever.",
+        default=120,
+        help="Stop waiting after this many seconds. 0 means wait forever. Default 120.",
     )
     return parser
 
@@ -268,7 +268,7 @@ def wait_for_reply(
     config: EmailConfig,
     thread_id: str,
     poll_seconds: int = 30,
-    timeout_seconds: int = 0,
+    timeout_seconds: int = 120,
 ) -> dict[str, Any]:
     started = time.time()
     while True:
