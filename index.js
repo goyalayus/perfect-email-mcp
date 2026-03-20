@@ -138,6 +138,28 @@ const TOOL_DEFS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "email_watch_response",
+    description:
+      "Wait for the next reply on the same mapped thread without sending a new message. Use for watcher agents.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        poll_seconds: { type: "integer", minimum: 1, description: "Fallback polling interval. Default 30." },
+        timeout_seconds: {
+          type: "integer",
+          minimum: 0,
+          description: "Watch timeout in seconds. 0 waits forever. Default 0.",
+        },
+        context_id: {
+          type: "string",
+          description:
+            "Optional explicit mapping key; otherwise uses CODEX_THREAD_ID/CODEX_SESSION_ID, then a process-scoped fallback.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
 ];
 
 let imapClient = null;
@@ -1007,6 +1029,47 @@ async function handleEmailFetchResponse(rawArgs = {}) {
   };
 }
 
+async function handleEmailWatchResponse(rawArgs = {}) {
+  const args = rawArgs || {};
+  const sessionKey = resolveSessionKey(args);
+  const pollSeconds = normalizePoll(args.poll_seconds, 30);
+  const timeoutSeconds = normalizeTimeout(args.timeout_seconds, 0);
+
+  const mapped = getMappedThread(sessionKey);
+  if (!mapped?.thread_id) {
+    return {
+      ok: true,
+      mode: "watch_response",
+      session_key: sessionKey,
+      thread_exists: false,
+      timed_out: true,
+      reply_count: 0,
+      replies: [],
+    };
+  }
+
+  const watchResult = await waitForReplyPersistent({
+    threadId: mapped.thread_id,
+    pollSeconds,
+    timeoutSeconds,
+  });
+  const replies = Array.isArray(watchResult.replies) ? watchResult.replies : [];
+  const latestReply = replies.length > 0 ? replies[replies.length - 1] : null;
+
+  return {
+    ok: true,
+    mode: "watch_response",
+    session_key: sessionKey,
+    thread_exists: true,
+    thread_id: mapped.thread_id,
+    timed_out: Boolean(watchResult.timed_out),
+    reply_count: watchResult.reply_count || replies.length,
+    last_seen_uid: watchResult.last_seen_uid || 0,
+    latest_reply: latestReply,
+    replies,
+  };
+}
+
 const server = new Server(
   {
     name: SERVER_NAME,
@@ -1038,6 +1101,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     if (name === "email_fetch_response") {
       const result = await handleEmailFetchResponse(args);
+      return toolResponse(result);
+    }
+    if (name === "email_watch_response") {
+      const result = await handleEmailWatchResponse(args);
       return toolResponse(result);
     }
 

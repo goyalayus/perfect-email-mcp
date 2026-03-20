@@ -10,6 +10,8 @@ MCP server that turns the existing `email_bridge.py` workflow into tool-level pr
   - Sends a question in the mapped Gmail thread, then blocks until a reply arrives (or timeout).
 - `email_fetch_response`
   - Non-blocking fetch of new replies from the same mapped thread.
+- `email_watch_response`
+  - Blocks on the next reply in the same mapped thread without sending a new email first.
 
 ## Automatic Thread Mapping
 
@@ -81,7 +83,7 @@ EMAIL_MCP_BRIDGE_SCRIPT = "/absolute/path/to/email-mcp/bridge/email_bridge.py"
 EMAIL_MCP_PYTHON = "python3"
 ```
 
-`tool_timeout_sec` is important for `email_ask`, since it can wait for a long time.
+`tool_timeout_sec` is important for `email_ask` and `email_watch_response`, since both can wait for a long time.
 
 ### Cursor (`~/.cursor/mcp.json` or project `.cursor/mcp.json`)
 
@@ -125,8 +127,9 @@ If your Claude client uses JSON `mcpServers` config instead, use the same block 
 
 - `email_ask` flushes already-seen replies before sending the new question, so it waits for a fresh reply.
 - `email_fetch_response` defaults to `advance=true`, meaning fetched replies will not appear again on later fetches.
+- `email_watch_response` is the right fit for watcher agents that should react as soon as the user replies to an existing thread.
 - For stable Gmail threading, each mapped session uses one canonical subject base; later `subject` inputs are ignored for that session.
-- `email_ask` and `email_fetch_response` keep a persistent IMAP session (auto-IDLE), so reply detection is much faster after warm-up.
+- `email_ask`, `email_fetch_response`, and `email_watch_response` keep a persistent IMAP session (auto-IDLE), so reply detection is much faster after warm-up.
 - `email_update`/`email_ask` use a pooled SMTP transport when SMTP env vars are present, which reduces repeated send overhead.
 - Default `email_ask` polling interval is 5 seconds (override with `poll_seconds`).
 - Default `email_ask` timeout is 120 seconds (override with `timeout_seconds`; set `0` to wait forever).

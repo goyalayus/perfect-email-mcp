@@ -7,11 +7,13 @@ import imaplib
 import json
 import os
 import re
+import select
 import smtplib
 import ssl
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from email.header import decode_header, make_header
 from email.message import EmailMessage
@@ -87,6 +89,17 @@ def main() -> int:
         print(json.dumps(result, indent=2, default=str))
         return 0
 
+    if args.command == "watch":
+        for event in watch_replies(
+            config=config,
+            thread_id=args.thread_id,
+            poll_seconds=args.poll_seconds,
+            timeout_seconds=args.timeout_seconds,
+            once=args.once,
+        ):
+            print(json.dumps(event, default=str), flush=True)
+        return 0
+
     raise SystemExit(f"unsupported command: {args.command}")
 
 
@@ -115,6 +128,17 @@ def _build_parser() -> argparse.ArgumentParser:
         default=120,
         help="Stop waiting after this many seconds. 0 means wait forever. Default 120.",
     )
+
+    watch_parser = subparsers.add_parser("watch", help="Watch one email thread and emit reply events.")
+    watch_parser.add_argument("--thread-id", required=True, help="Thread id returned by `send`.")
+    watch_parser.add_argument("--poll-seconds", type=int, default=30, help="Fallback polling interval.")
+    watch_parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=0,
+        help="Stop watching after this many seconds. 0 means watch forever.",
+    )
+    watch_parser.add_argument("--once", action="store_true", help="Exit after the first reply event or timeout event.")
     return parser
 
 
@@ -215,52 +239,27 @@ def send_email(*, config: EmailConfig, to: str, subject: str, body: str, thread_
 
 def fetch_replies(*, config: EmailConfig, thread_id: str, limit: int = 10, advance: bool = True) -> dict[str, Any]:
     state = _load_state(config, thread_id)
-    marker = state.marker or THREAD_PREFIX.format(thread_id=thread_id)
-    replies: list[dict[str, Any]] = []
+    state.marker = state.marker or THREAD_PREFIX.format(thread_id=thread_id)
+    start_uid = max(1, state.last_seen_uid + 1)
 
-    with imaplib.IMAP4_SSL(config.imap_host, config.imap_port, timeout=60) as imap:
-        imap.login(config.username, config.password)
-        status, _ = imap.select(config.mailbox)
-        if status != "OK":
-            raise RuntimeError(f"unable to select mailbox {config.mailbox}")
+    with _selected_imap_connection(config, timeout=60) as imap:
+        replies, next_scan_uid = _scan_matching_replies(
+            imap=imap,
+            state=state,
+            start_uid=start_uid,
+            limit=max(1, limit),
+        )
 
-        first_uid = max(1, state.last_seen_uid + 1)
-        status, data = imap.uid("search", None, "UID", f"{first_uid}:*")
-        if status != "OK":
-            status, data = imap.uid("search", None, "ALL")
-        if status != "OK":
-            raise RuntimeError("imap search failed")
-        uids = [int(item) for item in (data[0] or b"").split() if item.strip()]
-        for uid in reversed(uids):
-            if uid <= state.last_seen_uid:
-                continue
-            status, fetched = imap.uid("fetch", str(uid), "(RFC822)")
-            if status != "OK" or not fetched or not fetched[0]:
-                continue
-            raw = fetched[0][1]
-            if not raw:
-                continue
-            message = email.message_from_bytes(raw)
-            parsed = _parse_message(message, uid=uid)
-            if not _matches_thread(parsed, marker=marker, known_message_ids=state.known_message_ids):
-                continue
-            replies.append(parsed)
-            if parsed["message_id"]:
-                state.known_message_ids = _unique_ids(state.known_message_ids + [parsed["message_id"]])
-                state.last_message_id = parsed["message_id"]
-            if len(replies) >= max(1, limit):
-                break
+    last_seen_uid = state.last_seen_uid
+    if advance:
+        last_seen_uid = max(last_seen_uid, next_scan_uid - 1)
+        _persist_thread_state(config=config, state=state, last_seen_uid=last_seen_uid, force=bool(replies))
 
-    replies.reverse()
-    if advance and replies:
-        state.last_seen_uid = max(int(item["uid"]) for item in replies)
-        _save_state(config, state)
-    return {
-        "thread_id": thread_id,
-        "reply_count": len(replies),
-        "last_seen_uid": state.last_seen_uid,
-        "replies": replies,
-    }
+    return _reply_batch_result(
+        thread_id=thread_id,
+        replies=replies,
+        last_seen_uid=last_seen_uid,
+    )
 
 
 def wait_for_reply(
@@ -270,24 +269,142 @@ def wait_for_reply(
     poll_seconds: int = 30,
     timeout_seconds: int = 120,
 ) -> dict[str, Any]:
-    started = time.time()
+    for event in watch_replies(
+        config=config,
+        thread_id=thread_id,
+        poll_seconds=poll_seconds,
+        timeout_seconds=timeout_seconds,
+        once=True,
+    ):
+        return _event_to_wait_result(event)
+    return _timed_out_result(thread_id)
+
+
+def watch_replies(
+    *,
+    config: EmailConfig,
+    thread_id: str,
+    poll_seconds: int = 30,
+    timeout_seconds: int = 0,
+    once: bool = False,
+):
+    started_at = time.monotonic()
+    state = _load_state(config, thread_id)
+    state.marker = state.marker or THREAD_PREFIX.format(thread_id=thread_id)
+    next_scan_uid = max(1, state.last_seen_uid + 1)
+    use_idle = True
+
     while True:
-        result = fetch_replies(config=config, thread_id=thread_id, limit=10, advance=True)
-        if result["replies"]:
-            return result
-        if timeout_seconds > 0 and (time.time() - started) >= timeout_seconds:
-            return {
-                "thread_id": thread_id,
-                "reply_count": 0,
-                "timed_out": True,
-                "replies": [],
-            }
-        time.sleep(max(1, poll_seconds))
+        remaining_seconds = _remaining_timeout_seconds(started_at=started_at, timeout_seconds=timeout_seconds)
+        if remaining_seconds is not None and remaining_seconds <= 0:
+            yield _timeout_event(thread_id)
+            return
+
+        try:
+            if use_idle:
+                replies, next_scan_uid = _watch_step_with_idle(
+                    config=config,
+                    state=state,
+                    start_uid=next_scan_uid,
+                    remaining_seconds=remaining_seconds,
+                )
+            else:
+                replies, next_scan_uid = _watch_step_with_polling(
+                    config=config,
+                    state=state,
+                    start_uid=next_scan_uid,
+                    poll_seconds=poll_seconds,
+                    remaining_seconds=remaining_seconds,
+                )
+        except Exception:
+            if use_idle:
+                use_idle = False
+                continue
+            raise
+
+        last_seen_uid = max(state.last_seen_uid, next_scan_uid - 1)
+        _persist_thread_state(config=config, state=state, last_seen_uid=last_seen_uid, force=bool(replies))
+
+        for reply in replies:
+            yield _reply_event(thread_id=thread_id, reply=reply, last_seen_uid=last_seen_uid)
+            if once:
+                return
+
+
+def _remaining_timeout_seconds(*, started_at: float, timeout_seconds: int) -> int | None:
+    if timeout_seconds <= 0:
+        return None
+    elapsed_seconds = int(time.monotonic() - started_at)
+    return max(0, timeout_seconds - elapsed_seconds)
+
+
+def _timed_out_result(thread_id: str) -> dict[str, Any]:
+    return {
+        "thread_id": thread_id,
+        "reply_count": 0,
+        "timed_out": True,
+        "replies": [],
+    }
+
+
+def _reply_event(*, thread_id: str, reply: dict[str, Any], last_seen_uid: int) -> dict[str, Any]:
+    return {
+        "event": "reply",
+        "thread_id": thread_id,
+        "last_seen_uid": last_seen_uid,
+        "reply": reply,
+    }
+
+
+def _timeout_event(thread_id: str) -> dict[str, Any]:
+    return {
+        "event": "timeout",
+        "thread_id": thread_id,
+        "timed_out": True,
+    }
+
+
+def _event_to_wait_result(event: dict[str, Any]) -> dict[str, Any]:
+    if event.get("event") != "reply":
+        return _timed_out_result(str(event.get("thread_id", "")))
+
+    thread_id = str(event.get("thread_id", ""))
+    last_seen_uid = int(event.get("last_seen_uid", 0) or 0)
+    reply = dict(event.get("reply") or {})
+    return _reply_batch_result(
+        thread_id=thread_id,
+        replies=[reply],
+        last_seen_uid=last_seen_uid,
+    )
+
+
+def _reply_batch_result(*, thread_id: str, replies: list[dict[str, Any]], last_seen_uid: int) -> dict[str, Any]:
+    return {
+        "thread_id": thread_id,
+        "reply_count": len(replies),
+        "last_seen_uid": last_seen_uid,
+        "replies": replies,
+    }
+
+
+def _idle_window_seconds(remaining_seconds: int | None) -> int:
+    if remaining_seconds is None:
+        return 29 * 60
+    return max(1, min(remaining_seconds, 29 * 60))
+
+
+@contextmanager
+def _selected_imap_connection(config: EmailConfig, *, timeout: int = 60):
+    with imaplib.IMAP4_SSL(config.imap_host, config.imap_port, timeout=timeout) as imap:
+        imap.login(config.username, config.password)
+        status, _ = imap.select(config.mailbox)
+        if status != "OK":
+            raise RuntimeError(f"unable to select mailbox {config.mailbox}")
+        yield imap
 
 
 def _mailbox_uidnext(config: EmailConfig) -> int:
-    with imaplib.IMAP4_SSL(config.imap_host, config.imap_port, timeout=10) as imap:
-        imap.login(config.username, config.password)
+    with _selected_imap_connection(config, timeout=10) as imap:
         status, data = imap.status(config.mailbox, "(UIDNEXT)")
         if status != "OK":
             raise RuntimeError(f"unable to read UIDNEXT for mailbox {config.mailbox}")
@@ -296,6 +413,181 @@ def _mailbox_uidnext(config: EmailConfig) -> int:
         if not match:
             raise RuntimeError("UIDNEXT not found in IMAP STATUS response")
         return int(match.group(1))
+
+
+def _watch_step_with_idle(
+    *,
+    config: EmailConfig,
+    state: ThreadState,
+    start_uid: int,
+    remaining_seconds: int | None,
+) -> tuple[list[dict[str, Any]], int]:
+    with _selected_imap_connection(config, timeout=60) as imap:
+        replies, next_scan_uid = _scan_matching_replies(
+            imap=imap,
+            state=state,
+            start_uid=start_uid,
+            limit=None,
+        )
+        if replies:
+            return replies, next_scan_uid
+
+        _idle_until_mailbox_activity(imap, timeout_seconds=_idle_window_seconds(remaining_seconds))
+
+        return _scan_matching_replies(
+            imap=imap,
+            state=state,
+            start_uid=next_scan_uid,
+            limit=None,
+        )
+
+
+def _watch_step_with_polling(
+    *,
+    config: EmailConfig,
+    state: ThreadState,
+    start_uid: int,
+    poll_seconds: int,
+    remaining_seconds: int | None,
+) -> tuple[list[dict[str, Any]], int]:
+    with _selected_imap_connection(config, timeout=60) as imap:
+        replies, next_scan_uid = _scan_matching_replies(
+            imap=imap,
+            state=state,
+            start_uid=start_uid,
+            limit=None,
+        )
+
+    if replies:
+        return replies, next_scan_uid
+
+    sleep_seconds = max(1, poll_seconds)
+    if remaining_seconds is not None:
+        sleep_seconds = min(sleep_seconds, max(1, remaining_seconds))
+    time.sleep(sleep_seconds)
+    return [], next_scan_uid
+
+
+def _scan_matching_replies(
+    *,
+    imap,
+    state: ThreadState,
+    start_uid: int,
+    limit: int | None,
+) -> tuple[list[dict[str, Any]], int]:
+    marker = state.marker or THREAD_PREFIX.format(thread_id=state.thread_id)
+    search_start_uid = max(1, start_uid)
+    status, data = imap.uid("search", None, "UID", f"{search_start_uid}:*")
+    if status != "OK":
+        status, data = imap.uid("search", None, "ALL")
+    if status != "OK":
+        raise RuntimeError("imap search failed")
+
+    uids = [int(item) for item in (data[0] or b"").split() if item.strip()]
+    replies: list[dict[str, Any]] = []
+    highest_seen_uid = search_start_uid - 1
+
+    for uid in uids:
+        if uid < search_start_uid:
+            continue
+        highest_seen_uid = max(highest_seen_uid, uid)
+        status, fetched = imap.uid("fetch", str(uid), "(RFC822)")
+        if status != "OK" or not fetched or not fetched[0]:
+            continue
+        raw = fetched[0][1]
+        if not raw:
+            continue
+        message = email.message_from_bytes(raw)
+        parsed = _parse_message(message, uid=uid)
+        if not _matches_thread(parsed, marker=marker, known_message_ids=state.known_message_ids):
+            continue
+        replies.append(parsed)
+        if parsed["message_id"]:
+            state.known_message_ids = _unique_ids(state.known_message_ids + [parsed["message_id"]])
+            state.last_message_id = parsed["message_id"]
+
+    if limit is not None and len(replies) > limit:
+        replies = replies[-limit:]
+
+    next_scan_uid = max(search_start_uid, highest_seen_uid + 1)
+    return replies, next_scan_uid
+
+
+def _persist_thread_state(
+    *,
+    config: EmailConfig,
+    state: ThreadState,
+    last_seen_uid: int,
+    force: bool = False,
+) -> None:
+    should_save = force or last_seen_uid > state.last_seen_uid
+    state.last_seen_uid = max(state.last_seen_uid, last_seen_uid)
+    if should_save:
+        _save_state(config, state)
+
+
+def _idle_until_mailbox_activity(imap: imaplib.IMAP4_SSL, *, timeout_seconds: int) -> None:
+    sock = getattr(imap, "sock", None)
+    if sock is None:
+        raise RuntimeError("imap idle socket unavailable")
+
+    tag = imap._new_tag()
+    imap.send(tag + b" IDLE\r\n")
+    continuation = imap._get_line()
+    if not continuation.startswith(b"+"):
+        raise RuntimeError(f"imap idle rejected: {continuation!r}")
+
+    deadline = time.monotonic() + max(1, timeout_seconds)
+
+    try:
+        while True:
+            wait_seconds = max(0.0, deadline - time.monotonic())
+            if wait_seconds == 0:
+                return
+
+            readable, _, _ = select.select([sock], [], [], wait_seconds)
+            if not readable:
+                return
+
+            line = imap._get_line()
+            upper_line = line.upper()
+
+            if upper_line.startswith(b"* BYE"):
+                raise RuntimeError(f"imap idle terminated by server: {line!r}")
+
+            if upper_line.startswith(b"* ") and (b" EXISTS" in upper_line or b" RECENT" in upper_line):
+                return
+    finally:
+        _finish_idle(imap, tag)
+
+
+def _finish_idle(imap: imaplib.IMAP4_SSL, tag: bytes) -> None:
+    sock = getattr(imap, "sock", None)
+    if sock is None:
+        raise RuntimeError("imap idle socket unavailable")
+
+    imap.send(b"DONE\r\n")
+    deadline = time.monotonic() + 10
+
+    while True:
+        wait_seconds = max(0.0, deadline - time.monotonic())
+        if wait_seconds == 0:
+            raise RuntimeError("imap idle did not terminate cleanly")
+
+        readable, _, _ = select.select([sock], [], [], wait_seconds)
+        if not readable:
+            continue
+
+        line = imap._get_line()
+        upper_line = line.upper()
+
+        if upper_line.startswith(b"* BYE"):
+            raise RuntimeError(f"imap idle terminated by server: {line!r}")
+
+        if line.startswith(tag + b" "):
+            if b" OK" not in upper_line:
+                raise RuntimeError(f"imap idle finished with non-OK response: {line!r}")
+            return
 
 
 def _parse_message(message: email.message.Message, *, uid: int) -> dict[str, Any]:
